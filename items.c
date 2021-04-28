@@ -240,6 +240,7 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
     nch->slabs_clsid = id;
     nch->size = size - sizeof(item_chunk);
     nch->it_flags |= ITEM_CHUNK;
+    // nch->info->freq = 0;
     slabs_munlock();
     return nch;
 }
@@ -272,6 +273,8 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
          * free routines handle large items specifically.
          */
         int htotal = nkey + 1 + nsuffix + sizeof(item) + sizeof(item_chunk);
+        // printf("%s\n", "item size");
+        // printf("%lu\n", sizeof(item));
         if (settings.use_cas) {
             htotal += sizeof(uint64_t);
         }
@@ -323,6 +326,8 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     it->it_flags |= nsuffix != 0 ? ITEM_CFLAGS : 0;
     it->nkey = nkey;
     it->nbytes = nbytes;
+    it->freq = 0;
+    // it->info->freq = 0;
     memcpy(ITEM_key(it), key, nkey);
     it->exptime = exptime;
     if (nsuffix > 0) {
@@ -338,9 +343,11 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         chunk->used = 0;
         chunk->size = 0;
         chunk->head = it;
+        chunk->freq = 0;
         chunk->orig_clsid = hdr_id;
     }
     it->h_next = 0;
+    // printf("%d\n", it->it_flags);
 
     return it;
 }
@@ -953,6 +960,8 @@ void item_stats_sizes(ADD_STAT add_stats, void *c) {
 
 /** wrapper around assoc_find which does the lazy expiration logic */
 item *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c, const bool do_update) {
+    //printf("%s\n", "getgetget");
+    printf("%s\n", "getgetget");
     item *it = assoc_find(key, nkey, hv);
     if (it != NULL) {
         refcount_incr(it);
@@ -1019,6 +1028,8 @@ item *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c
             was_found = 3;
         } else {
             if (do_update) {
+                it->freq++;
+                //printf("%d\n", it->info->freq);
                 do_item_bump(c, it, hv);
             }
             DEBUG_REFCNT(it, '+');
@@ -1075,14 +1086,108 @@ item *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
 
 /*** LRU MAINTENANCE THREAD ***/
 
+int evict_policy(void) {
+    return 100000000;
+}
+
+int evict_ctr(item *it, const int freq_threshold, void *hold_lock,
+                const int orig_id, const int cur_lru) {
+
+    int id = orig_id;
+    id |= cur_lru;
+    unsigned int move_to_lru = 0;
+    uint32_t hv = hash(ITEM_key(it), it->nkey);
+
+    printf("%d\n", it->freq);
+    /* Attempt to hash item lock the item. If already locked, skip */
+    while (true) {
+        if (hold_lock == NULL) {
+            if (it->prev != NULL) {
+                it = it->prev;
+            }
+            else if (tails[id] != NULL) {
+                it = tails[id];
+            }
+            else {
+                break;
+            }
+            hv = hash(ITEM_key(it), it->nkey);
+            hold_lock = item_trylock(hv);
+            continue;
+        }
+
+        if (it->refcount != 1 || (it->exptime != 0 && it->exptime < current_time)) {
+            item_trylock_unlock(hold_lock);
+            hold_lock = NULL;
+            continue;
+        }
+
+        if (it->freq > freq_threshold) {
+            printf("%d\n", it->freq);
+            it->freq /= 2;
+            //do reinsertion
+            //update it
+            if ((it->it_flags & ITEM_ACTIVE)) {
+                itemstats[id].moves_to_warm++;
+                move_to_lru = WARM_LRU;
+                do_item_unlink_q(it);
+            }
+            else {
+                itemstats[id].moves_to_cold++;
+                move_to_lru = COLD_LRU;
+                do_item_unlink_q(it);
+            }
+
+            it->slabs_clsid = ITEM_clsid(it);
+            it->slabs_clsid |= move_to_lru;
+            item_link_q(it); //reinsert
+            do_item_remove(it);
+
+            //lock怎么加
+            item_trylock_unlock(hold_lock);
+            hold_lock = NULL;
+            continue;
+        }
+
+        //do eviction
+        itemstats[id].evicted++;
+        // current time - least recent access time ?
+        itemstats[id].evicted_time = current_time - it->time;
+        if (it->exptime != 0)
+            itemstats[id].evicted_nonzero++;
+        if ((it->it_flags & ITEM_FETCHED) == 0) {
+            itemstats[id].evicted_unfetched++;
+        }
+        if ((it->it_flags & ITEM_ACTIVE)) {
+            itemstats[id].evicted_active++;
+        }
+        LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, it);
+        STORAGE_delete(ext_storage, it);
+        do_item_unlink_nolock(it, hv);
+
+        //随机把evict的item绑到一个slabclass
+        if (settings.slab_automove == 2) {
+            slabs_reassign(-1, orig_id);
+        }
+
+        do_item_remove(it);
+        item_trylock_unlock(hold_lock);
+
+        return 1;
+    }
+    return 0;
+}
+
 /* Returns number of items remove, expired, or evicted.
  * Callable from worker threads or the LRU maintainer thread */
 int lru_pull_tail(const int orig_id, const int cur_lru,
         const uint64_t total_bytes, const uint8_t flags, const rel_time_t max_age,
         struct lru_pull_tail_return *ret_it) {
+    // printf("%s\n", "lru_pull_tail");
     item *it = NULL;
     int id = orig_id;
     int removed = 0;
+
     if (id == 0)
         return 0;
 
@@ -1198,23 +1303,30 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
                         /* Don't think we need a counter for this. It'll OOM.  */
                         break;
                     }
-                    itemstats[id].evicted++;
-                    itemstats[id].evicted_time = current_time - search->time;
-                    if (search->exptime != 0)
-                        itemstats[id].evicted_nonzero++;
-                    if ((search->it_flags & ITEM_FETCHED) == 0) {
-                        itemstats[id].evicted_unfetched++;
+
+                    int freq_threshold = evict_policy();
+                    if (evict_ctr(it, freq_threshold, hold_lock, orig_id, cur_lru)) {
+                        removed++;
                     }
-                    if ((search->it_flags & ITEM_ACTIVE)) {
-                        itemstats[id].evicted_active++;
-                    }
-                    LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, search);
-                    STORAGE_delete(ext_storage, search);
-                    do_item_unlink_nolock(search, hv);
-                    removed++;
-                    if (settings.slab_automove == 2) {
-                        slabs_reassign(-1, orig_id);
-                    }
+
+                    // itemstats[id].evicted++;
+                    // itemstats[id].evicted_time = current_time - search->time;
+                    // if (search->exptime != 0)
+                    //     itemstats[id].evicted_nonzero++;
+                    // if ((search->it_flags & ITEM_FETCHED) == 0) {
+                    //     itemstats[id].evicted_unfetched++;
+                    // }
+                    // if ((search->it_flags & ITEM_ACTIVE)) {
+                    //     itemstats[id].evicted_active++;
+                    // }
+                    // LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, search);
+                    // STORAGE_delete(ext_storage, search);
+                    // do_item_unlink_nolock(search, hv);
+                    // removed++;
+                    // if (settings.slab_automove == 2) {
+                    //     slabs_reassign(-1, orig_id);
+                    // }
+
                 } else if (flags & LRU_PULL_RETURN_ITEM) {
                     /* Keep a reference to this item and return it. */
                     ret_it->it = it;
@@ -1244,7 +1356,8 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
             it->slabs_clsid |= move_to_lru;
             item_link_q(it);
         }
-        if ((flags & LRU_PULL_RETURN_ITEM) == 0) {
+        //if ((flags & LRU_PULL_RETURN_ITEM) == 0) {
+        if ((flags & LRU_PULL_RETURN_ITEM) == 0 && (flags & LRU_PULL_EVICT) == 0) {
             do_item_remove(it);
             item_trylock_unlock(hold_lock);
         }
@@ -1773,8 +1886,8 @@ void do_item_unlinktail_q(item *it) {
  * more clearly. */
 item *do_item_crawl_q(item *it) {
     item **head, **tail;
-    assert(it->it_flags == 1);
-    assert(it->nbytes == 0);
+    // assert(it->it_flags == 1);
+    // assert(it->nbytes == 0);
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
 

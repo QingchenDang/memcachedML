@@ -521,10 +521,17 @@ extern struct settings settings;
 /* if item has been marked as a stale value */
 #define ITEM_STALE 2048
 
+typedef struct {
+    int freq;
+    rel_time_t tta;
+} evict_info;
+
 /**
  * Structure for storing items within memcached.
  */
 typedef struct _stritem {
+    int freq;
+
     /* Protected by LRU locks */
     struct _stritem *next;
     struct _stritem *prev;
@@ -555,6 +562,8 @@ enum crawler_run_type {
 };
 
 typedef struct {
+    int freq;
+
     struct _stritem *next;
     struct _stritem *prev;
     struct _stritem *h_next;    /* hash chain next */
@@ -573,6 +582,8 @@ typedef struct {
 
 /* Header when an item is actually a chunk of another item. */
 typedef struct _strchunk {
+    int freq;
+
     struct _strchunk *next;     /* points within its own chain. */
     struct _strchunk *prev;     /* can potentially point to the head. */
     struct _stritem  *head;     /* always points to the owner chunk */

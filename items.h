@@ -6,6 +6,10 @@
 #define CLEAR_LRU(id) (id & ~(3<<6))
 #define GET_LRU(id) (id & (3<<6))
 
+int evict_policy(void);
+int evict_ctr(item *it, const int freq_threshold, void *hold_lock,
+                const int orig_id, const int cur_lru);
+
 /* See items.c */
 uint64_t get_cas_id(void);
 void set_cas_id(uint64_t new_cas);
