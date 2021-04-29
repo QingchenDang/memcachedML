@@ -960,8 +960,7 @@ void item_stats_sizes(ADD_STAT add_stats, void *c) {
 
 /** wrapper around assoc_find which does the lazy expiration logic */
 item *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c, const bool do_update) {
-    //printf("%s\n", "getgetget");
-    printf("%s\n", "getgetget");
+//	fprintf(stderr, "getgetget\n");
     item *it = assoc_find(key, nkey, hv);
     if (it != NULL) {
         refcount_incr(it);
@@ -1087,20 +1086,21 @@ item *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
 /*** LRU MAINTENANCE THREAD ***/
 
 int evict_policy(void) {
-    return 100000000;
+    return 1000000;
 }
 
 int evict_ctr(item *it, const int freq_threshold, void *hold_lock,
                 const int orig_id, const int cur_lru) {
-
     int id = orig_id;
     id |= cur_lru;
     unsigned int move_to_lru = 0;
     uint32_t hv = hash(ITEM_key(it), it->nkey);
-
+ 
+ 	printf("%s\n", "eviction");   
     printf("%d\n", it->freq);
+    fflush(stdout);
     /* Attempt to hash item lock the item. If already locked, skip */
-    while (true) {
+    while (it != NULL) {
         if (hold_lock == NULL) {
             if (it->prev != NULL) {
                 it = it->prev;
@@ -1115,15 +1115,15 @@ int evict_ctr(item *it, const int freq_threshold, void *hold_lock,
             hold_lock = item_trylock(hv);
             continue;
         }
-
+/*
         if (it->refcount != 1 || (it->exptime != 0 && it->exptime < current_time)) {
             item_trylock_unlock(hold_lock);
             hold_lock = NULL;
             continue;
         }
-
+*/
         if (it->freq > freq_threshold) {
-            printf("%d\n", it->freq);
+            //printf("%d\n", it->freq);
             it->freq /= 2;
             //do reinsertion
             //update it
