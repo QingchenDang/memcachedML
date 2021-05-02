@@ -1027,8 +1027,10 @@ item *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c
             was_found = 3;
         } else {
             if (do_update) {
-                it->freq++;
-                //printf("%d\n", it->info->freq);
+                it->freq += 1;
+				printf("%s\n","get item");
+				printf("%d\n", it->nkey);
+                printf("%d\n", it->freq);
                 do_item_bump(c, it, hv);
             }
             DEBUG_REFCNT(it, '+');
@@ -1086,96 +1088,148 @@ item *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
 /*** LRU MAINTENANCE THREAD ***/
 
 int evict_policy(void) {
-    return 1000000;
+    return 1;
 }
 
-int evict_ctr(item *it, const int freq_threshold, void *hold_lock,
-                const int orig_id, const int cur_lru) {
+int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
+                const int orig_id, const int cur_lru, int *removed) {
     int id = orig_id;
     id |= cur_lru;
     unsigned int move_to_lru = 0;
-    uint32_t hv = hash(ITEM_key(it), it->nkey);
- 
- 	printf("%s\n", "eviction");   
-    printf("%d\n", it->freq);
-    fflush(stdout);
-    /* Attempt to hash item lock the item. If already locked, skip */
-    while (it != NULL) {
-        if (hold_lock == NULL) {
-            if (it->prev != NULL) {
-                it = it->prev;
-            }
-            else if (tails[id] != NULL) {
-                it = tails[id];
+    uint32_t hv = hash(ITEM_key(*it), (*it)->nkey);
+	if ((*it)->freq > 0) { 
+ 		printf("%s\n", "eviction");   
+    	printf("%d\n", (*it)->freq);
+	}
+	int tail_locked = 0;
+	// Attempt to hash item lock the item. If already locked, skip 
+    while (*it != NULL) {
+        if (*hold_lock == NULL) {
+			printf("%s\n", "look for next item");
+            if (tails[id] != NULL) { 
+				if (tail_locked != 1) {
+                	*it = tails[id];
+					tail_locked = 1;
+				}
+				else {
+					*it = (*it)->prev;
+				}
             }
             else {
                 break;
             }
-            hv = hash(ITEM_key(it), it->nkey);
-            hold_lock = item_trylock(hv);
+            hv = hash(ITEM_key(*it), (*it)->nkey);
+            *hold_lock = item_trylock(hv);
             continue;
         }
-/*
-        if (it->refcount != 1 || (it->exptime != 0 && it->exptime < current_time)) {
-            item_trylock_unlock(hold_lock);
-            hold_lock = NULL;
-            continue;
+		tail_locked = 0;
+
+		// Now see if the item is refcount locked
+		// TODO: evict a reflocked item?
+        if (refcount_incr((*it)) != 2) {
+			printf("%s\n", "refcount lock");
+			printf("%d\n", (*it)->refcount);
+            // Note pathological case with ref'ed items in tail.
+            // Can still unlink the item, but it won't be reusable yet
+            itemstats[id].lrutail_reflocked++;
+            // In case of refcount leaks, enable for quick workaround.
+            // WARNING: This can cause terrible corruption
+            if (settings.tail_repair_time &&
+                    (*it)->time + settings.tail_repair_time < current_time) {
+				printf("%s\n", "refcount leak");
+                itemstats[id].tailrepairs++;
+                // This will call item_remove -> item_free since refcnt is 1
+				(*it)->refcount = 2;
+                
+				STORAGE_delete(ext_storage, *it);
+                do_item_unlink_nolock(*it, hv);
+				break;
+            }
+			refcount_decr((*it));
         }
-*/
-        if (it->freq > freq_threshold) {
-            //printf("%d\n", it->freq);
-            it->freq /= 2;
+
+
+		// Expired or flushed
+        if (((*it)->exptime != 0 && (*it)->exptime < current_time)
+            || item_is_flushed((*it))) {
+			printf("%s\n", "expired/flushed");
+            itemstats[id].reclaimed++;
+            if (((*it)->it_flags & ITEM_FETCHED) == 0) {
+                itemstats[id].expired_unfetched++;
+            }
+            printf("%s\n", "unlink");
+			// refcnt 2 -> 1
+            do_item_unlink_nolock(*it, hv);
+            STORAGE_delete(ext_storage, *it);
+            // refcnt 1 -> 0 -> item_free
+            (*removed)++;
+
+            break;
+        }
+
+        if ((*it)->freq >= freq_threshold) {
+            printf("%s\n", "reinsert");
+            (*it)->freq /= 2;
             //do reinsertion
             //update it
-            if ((it->it_flags & ITEM_ACTIVE)) {
+            if (((*it)->it_flags & ITEM_ACTIVE)) {
+				printf("%s\n", "move to warm");
+				(*it)->it_flags &= ~ITEM_ACTIVE;
                 itemstats[id].moves_to_warm++;
                 move_to_lru = WARM_LRU;
-                do_item_unlink_q(it);
+                do_item_unlink_q(*it);
             }
             else {
+				printf("%s\n", "move to cold");
                 itemstats[id].moves_to_cold++;
                 move_to_lru = COLD_LRU;
-                do_item_unlink_q(it);
+                do_item_unlink_q(*it);
             }
 
-            it->slabs_clsid = ITEM_clsid(it);
-            it->slabs_clsid |= move_to_lru;
-            item_link_q(it); //reinsert
-            do_item_remove(it);
+			printf("%s\n", "start relink");
+            (*it)->slabs_clsid = ITEM_clsid(*it);
+            (*it)->slabs_clsid |= move_to_lru;
+			printf("%s\n", "link");
+            do_item_link_q(*it); //reinsert
+			printf("%s\n", "remove");
+            do_item_remove(*it);
 
+			printf("%s\n", "unlock");
             //lock怎么加
-            item_trylock_unlock(hold_lock);
-            hold_lock = NULL;
+            item_trylock_unlock(*hold_lock);
+			printf("%s\n", "null lock");
+            *hold_lock = NULL;
             continue;
         }
 
-        //do eviction
+        printf("%s\n", "do eviction");
+		//do eviction
         itemstats[id].evicted++;
         // current time - least recent access time ?
-        itemstats[id].evicted_time = current_time - it->time;
-        if (it->exptime != 0)
+        itemstats[id].evicted_time = current_time - (*it)->time;
+        if ((*it)->exptime != 0)
             itemstats[id].evicted_nonzero++;
-        if ((it->it_flags & ITEM_FETCHED) == 0) {
+        if (((*it)->it_flags & ITEM_FETCHED) == 0) {
             itemstats[id].evicted_unfetched++;
         }
-        if ((it->it_flags & ITEM_ACTIVE)) {
+        if (((*it)->it_flags & ITEM_ACTIVE)) {
             itemstats[id].evicted_active++;
         }
-        LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, it);
-        STORAGE_delete(ext_storage, it);
-        do_item_unlink_nolock(it, hv);
+        LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, *it);
+        STORAGE_delete(ext_storage, *it);
+        do_item_unlink_nolock(*it, hv);
+		(*removed)++;
 
         //随机把evict的item绑到一个slabclass
         if (settings.slab_automove == 2) {
             slabs_reassign(-1, orig_id);
         }
 
-        do_item_remove(it);
-        item_trylock_unlock(hold_lock);
-
         return 1;
     }
+
     return 0;
+
 }
 
 /* Returns number of items remove, expired, or evicted.
@@ -1197,6 +1251,7 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
     void *hold_lock = NULL;
     unsigned int move_to_lru = 0;
     uint64_t limit = 0;
+	int succ_evict = 1;
 
     id |= cur_lru;
     pthread_mutex_lock(&lru_locks[id]);
@@ -1305,9 +1360,7 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
                     }
 
                     int freq_threshold = evict_policy();
-                    if (evict_ctr(it, freq_threshold, hold_lock, orig_id, cur_lru)) {
-                        removed++;
-                    }
+                    succ_evict = evict_ctr(&it, freq_threshold, &hold_lock, orig_id, cur_lru, &removed);
 
                     // itemstats[id].evicted++;
                     // itemstats[id].evicted_time = current_time - search->time;
@@ -1356,8 +1409,7 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
             it->slabs_clsid |= move_to_lru;
             item_link_q(it);
         }
-        //if ((flags & LRU_PULL_RETURN_ITEM) == 0) {
-        if ((flags & LRU_PULL_RETURN_ITEM) == 0 && (flags & LRU_PULL_EVICT) == 0) {
+        if ((flags & LRU_PULL_RETURN_ITEM) == 0 && succ_evict == 1) {
             do_item_remove(it);
             item_trylock_unlock(hold_lock);
         }

@@ -7,8 +7,8 @@
 #define GET_LRU(id) (id & (3<<6))
 
 int evict_policy(void);
-int evict_ctr(item *it, const int freq_threshold, void *hold_lock,
-                const int orig_id, const int cur_lru);
+int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
+                const int orig_id, const int cur_lru, int *removed);
 
 /* See items.c */
 uint64_t get_cas_id(void);
