@@ -1059,8 +1059,10 @@ void do_item_bump(conn *c, item *it, const uint32_t hv) {
     if (settings.lru_segmented) {
         if ((it->it_flags & ITEM_ACTIVE) == 0) {
             if ((it->it_flags & ITEM_FETCHED) == 0) {
+				printf("%s\n", "item becomes fetched");
                 it->it_flags |= ITEM_FETCHED;
             } else {
+				printf("%s\n", "item becomes active");
                 it->it_flags |= ITEM_ACTIVE;
                 if (ITEM_lruid(it) != COLD_LRU) {
                     it->time = current_time; // only need to bump time.
@@ -1088,7 +1090,7 @@ item *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
 /*** LRU MAINTENANCE THREAD ***/
 
 int evict_policy(void) {
-    return 1;
+    return 3;
 }
 
 int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
@@ -1164,7 +1166,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             // refcnt 1 -> 0 -> item_free
             (*removed)++;
 
-            break;
+            return 1;
         }
 
         if ((*it)->freq >= freq_threshold) {
@@ -1172,12 +1174,20 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             (*it)->freq /= 2;
             //do reinsertion
             //update it
-            if (((*it)->it_flags & ITEM_ACTIVE)) {
+            if (((*it)->it_flags & ITEM_ACTIVE) != 0
+                        && settings.lru_segmented) {
 				printf("%s\n", "move to warm");
+				itemstats[id].moves_to_warm++;
 				(*it)->it_flags &= ~ITEM_ACTIVE;
-                itemstats[id].moves_to_warm++;
                 move_to_lru = WARM_LRU;
                 do_item_unlink_q(*it);
+				//(*removed)++;
+				//printf("%s\n", "start relink");
+	            //(*it)->slabs_clsid = ITEM_clsid(*it);
+	            //(*it)->slabs_clsid |= move_to_lru;
+	            //printf("%s\n", "link");
+	            //do_item_link_q(*it); //reinsert
+				//return 1;
             }
             else {
 				printf("%s\n", "move to cold");
@@ -1217,6 +1227,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
         }
         LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, *it);
         STORAGE_delete(ext_storage, *it);
+		printf("%s\n", "eviction: unlink");
         do_item_unlink_nolock(*it, hv);
 		(*removed)++;
 
