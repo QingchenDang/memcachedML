@@ -1099,21 +1099,21 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
     id |= cur_lru;
     //unsigned int move_to_lru = 0;
     uint32_t hv = hash(ITEM_key(*it), (*it)->nkey);
-	if ((*it)->freq > 0) { 
- 		printf("%s\n", "eviction");   
-    	printf("%d\n", (*it)->freq);
-	}
+	// if ((*it)->freq > 0) { 
+ 	// 	printf("%s\n", "eviction");
+    // 	printf("%d\n", (*it)->freq);
+	// }
 	int tail_locked = 0;
 	int check_ref = 0;
-	// Attempt to hash item lock the item. If already locked, skip 
+	// Attempt to hash item lock the item. If already locked, skip
     while (*it != NULL) {
 		if (check_ref == 0) {
 			refcount_decr((*it));
 			check_ref = 1;
 		}
         if (*hold_lock == NULL) {
-			printf("%s\n", "look for next item");
-            if (tails[id] != NULL) { 
+			// printf("%s\n", "look for next item");
+            if (tails[id] != NULL) {
 				if (tail_locked != 1) {
                 	*it = tails[id];
 					tail_locked = 1;
@@ -1123,7 +1123,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
 				}
             }
             else {
-				printf("%s\n", "eviction failed");
+				// printf("%s\n", "eviction failed");
                 break;
             }
             hv = hash(ITEM_key(*it), (*it)->nkey);
@@ -1135,8 +1135,8 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
 		// Now see if the item is refcount locked
 		// TODO: evict a reflocked item?
         if (refcount_incr((*it)) != 2) {
-			printf("%s\n", "refcount lock");
-			printf("%d\n", (*it)->refcount);
+			// printf("%s\n", "refcount lock");
+			// printf("%d\n", (*it)->refcount);
             // Note pathological case with ref'ed items in tail.
             // Can still unlink the item, but it won't be reusable yet
             itemstats[id].lrutail_reflocked++;
@@ -1144,11 +1144,11 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             // WARNING: This can cause terrible corruption
             if (settings.tail_repair_time &&
                     (*it)->time + settings.tail_repair_time < current_time) {
-				printf("%s\n", "refcount leak");
+				// printf("%s\n", "refcount leak");
                 itemstats[id].tailrepairs++;
                 // This will call item_remove -> item_free since refcnt is 1
 				(*it)->refcount = 1;
-                
+
 				STORAGE_delete(ext_storage, *it);
                 do_item_unlink_nolock(*it, hv);
 				item_trylock_unlock(*hold_lock);
@@ -1160,12 +1160,12 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
 		// Expired or flushed
         if (((*it)->exptime != 0 && (*it)->exptime < current_time)
             || item_is_flushed((*it))) {
-			printf("%s\n", "expired/flushed");
+			// printf("%s\n", "expired/flushed");
             itemstats[id].reclaimed++;
             if (((*it)->it_flags & ITEM_FETCHED) == 0) {
                 itemstats[id].expired_unfetched++;
             }
-            printf("%s\n", "unlink");
+            // printf("%s\n", "unlink");
 			// refcnt 2 -> 1
             do_item_unlink_nolock(*it, hv);
             STORAGE_delete(ext_storage, *it);
@@ -1176,8 +1176,8 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
         }
 
         if ((*it)->freq >= freq_threshold) {
-            printf("%s\n", "reinsert");
-			printf("%d\n", (*it)->freq);
+            // printf("%s\n", "reinsert");
+			// printf("%d\n", (*it)->freq);
             (*it)->freq /= 2;
             //do reinsertion
             //update it
@@ -1204,7 +1204,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
                 do_item_unlink_q(*it);
             }
 			*/
-			printf("%s\n", "start reinsert");
+			// printf("%s\n", "start reinsert");
 			(*removed)++;
 			itemstats[id].moves_within_lru++;
 			do_item_unlink_q(*it);
@@ -1216,7 +1216,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             //(*it)->it_flags &= ~ITEM_ACTIVE;
 	        move_to_lru = COLD_LRU;
 			do_item_unlink_q(*it);
-			
+
 			printf("%s\n", "start relink");
             (*it)->slabs_clsid = ITEM_clsid(*it);
             (*it)->slabs_clsid |= move_to_lru;
@@ -1234,7 +1234,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             continue;
         }
 
-        printf("%s\n", "do eviction");
+        // printf("%s\n", "do eviction");
 		//do eviction
         itemstats[id].evicted++;
         // current time - least recent access time ?
@@ -1248,12 +1248,12 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             itemstats[id].evicted_active++;
         }
         LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, *it);
-		printf("%s\n", "storage delete");
+		// printf("%s\n", "storage delete");
         STORAGE_delete(ext_storage, *it);
-		printf("%d\n", (*it)->refcount);
-		printf("%s\n", "eviction: unlink");
+		// printf("%d\n", (*it)->refcount);
+		// printf("%s\n", "eviction: unlink");
         do_item_unlink_nolock(*it, hv);
-		printf("%d\n", (*it)->refcount);
+		// printf("%d\n", (*it)->refcount);
 		(*removed)++;
 		//(*it)->refcount = 1;
 
@@ -1261,8 +1261,8 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
         if (settings.slab_automove == 2) {
             slabs_reassign(-1, orig_id);
         }
-		printf("%s\n", "eviction end");
-		printf("%d\n", (*it)->refcount);
+		// printf("%s\n", "eviction end");
+		// printf("%d\n", (*it)->refcount);
 
         return 1;
     }
