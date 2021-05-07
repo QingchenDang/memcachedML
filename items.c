@@ -1097,15 +1097,20 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
                 const int orig_id, const int cur_lru, int *removed) {
     int id = orig_id;
     id |= cur_lru;
-    unsigned int move_to_lru = 0;
+    //unsigned int move_to_lru = 0;
     uint32_t hv = hash(ITEM_key(*it), (*it)->nkey);
 	if ((*it)->freq > 0) { 
  		printf("%s\n", "eviction");   
     	printf("%d\n", (*it)->freq);
 	}
 	int tail_locked = 0;
+	int check_ref = 0;
 	// Attempt to hash item lock the item. If already locked, skip 
     while (*it != NULL) {
+		if (check_ref == 0) {
+			refcount_decr((*it));
+			check_ref = 1;
+		}
         if (*hold_lock == NULL) {
 			printf("%s\n", "look for next item");
             if (tails[id] != NULL) { 
@@ -1118,6 +1123,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
 				}
             }
             else {
+				printf("%s\n", "eviction failed");
                 break;
             }
             hv = hash(ITEM_key(*it), (*it)->nkey);
@@ -1141,13 +1147,13 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
 				printf("%s\n", "refcount leak");
                 itemstats[id].tailrepairs++;
                 // This will call item_remove -> item_free since refcnt is 1
-				(*it)->refcount = 2;
+				(*it)->refcount = 1;
                 
 				STORAGE_delete(ext_storage, *it);
                 do_item_unlink_nolock(*it, hv);
+				item_trylock_unlock(*hold_lock);
 				break;
             }
-			refcount_decr((*it));
         }
 
 
@@ -1165,16 +1171,18 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             STORAGE_delete(ext_storage, *it);
             // refcnt 1 -> 0 -> item_free
             (*removed)++;
-
-            return 1;
+			item_trylock_unlock(*hold_lock);
+            break;
         }
 
         if ((*it)->freq >= freq_threshold) {
             printf("%s\n", "reinsert");
+			printf("%d\n", (*it)->freq);
             (*it)->freq /= 2;
             //do reinsertion
             //update it
-            if (((*it)->it_flags & ITEM_ACTIVE) != 0
+            /*
+			if (((*it)->it_flags & ITEM_ACTIVE) != 0
                         && settings.lru_segmented) {
 				printf("%s\n", "move to warm");
 				itemstats[id].moves_to_warm++;
@@ -1195,12 +1203,25 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
                 move_to_lru = COLD_LRU;
                 do_item_unlink_q(*it);
             }
-
+			*/
+			printf("%s\n", "start reinsert");
+			(*removed)++;
+			itemstats[id].moves_within_lru++;
+			do_item_unlink_q(*it);
+            do_item_link_q(*it);
+            do_item_remove(*it);
+            item_trylock_unlock(*hold_lock);
+/*
+			itemstats[id].moves_to_cold++;
+            //(*it)->it_flags &= ~ITEM_ACTIVE;
+	        move_to_lru = COLD_LRU;
+			do_item_unlink_q(*it);
+			
 			printf("%s\n", "start relink");
             (*it)->slabs_clsid = ITEM_clsid(*it);
             (*it)->slabs_clsid |= move_to_lru;
 			printf("%s\n", "link");
-            do_item_link_q(*it); //reinsert
+            item_link_q(*it); //reinsert
 			printf("%s\n", "remove");
             do_item_remove(*it);
 
@@ -1208,6 +1229,7 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             //lock怎么加
             item_trylock_unlock(*hold_lock);
 			printf("%s\n", "null lock");
+			*/
             *hold_lock = NULL;
             continue;
         }
@@ -1226,15 +1248,21 @@ int evict_ctr(item **it, const int freq_threshold, void **hold_lock,
             itemstats[id].evicted_active++;
         }
         LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, *it);
+		printf("%s\n", "storage delete");
         STORAGE_delete(ext_storage, *it);
+		printf("%d\n", (*it)->refcount);
 		printf("%s\n", "eviction: unlink");
         do_item_unlink_nolock(*it, hv);
+		printf("%d\n", (*it)->refcount);
 		(*removed)++;
+		//(*it)->refcount = 1;
 
         //随机把evict的item绑到一个slabclass
         if (settings.slab_automove == 2) {
             slabs_reassign(-1, orig_id);
         }
+		printf("%s\n", "eviction end");
+		printf("%d\n", (*it)->refcount);
 
         return 1;
     }
@@ -1369,7 +1397,6 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
                         /* Don't think we need a counter for this. It'll OOM.  */
                         break;
                     }
-
                     int freq_threshold = evict_policy();
                     succ_evict = evict_ctr(&it, freq_threshold, &hold_lock, orig_id, cur_lru, &removed);
 
